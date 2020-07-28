@@ -1,0 +1,276 @@
+#include <ESP8266WiFi.h>
+#include <WiFi_Sniffer.h>
+#include <Ticker.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_IS31FL3731.h>
+#include <lmic.h>
+#include <hal/hal.h>
+
+String matrixausgabe_text  = " "; // Ausgabetext als globale Variable
+
+volatile int matrixausgabe_index = 0;// aktuelle Position in Matrix
+
+int Eingeloggt = 0 ;
+unsigned int Sniff_channel = 1;
+//------------ WiFi-Sniffer,  This software is based on the work of Andreas Spiess, https://github.com/SensorsIot/Wi-Fi-Sniffer-as-a-Human-detector//                            and Ray Burnette: https://www.hackster.io/rayburne/esp8266-mini-sniff-f6b93a 
+int WiFiPaxCounter(int MinRSSI,  int timeout, int8 mychannel,String myMAC,int mydisplay) {
+  int mycount=0;
+  int randMAC=0;
+  int ChanMin = 1, ChanMax =13; // europe channel 1-13, Japan 1-14
+  if (mychannel > 0) {
+    ChanMax = mychannel; 
+    ChanMin = mychannel;
+  };
+  if (mychannel < 0) {
+    randMAC = mychannel;
+  };
+  wifi_set_promiscuous_rx_cb(promisc_cb);   // Set up promiscuous callback
+  Sniff_channel = ChanMin;
+  wifi_set_channel(Sniff_channel);
+  wifi_promiscuous_enable(true);
+  for (Sniff_channel = ChanMin; Sniff_channel <= ChanMax; Sniff_channel++) {
+    wifi_set_channel(Sniff_channel);
+    delay(300);            // 300 ms per channel
+  }
+  wifi_promiscuous_enable(false);
+  mycount = SnifferCountDevices(MinRSSI,timeout,myMAC,randMAC,mydisplay); // Anzeige/zaehlen der Clients 
+  return mycount;
+}
+
+int Alle = 0 ;
+int Besucher = 0 ;
+volatile int matrixausgabe_wait  = 0;// warte bis Anzeige durchgelaufen ist
+
+//--------------------------------------- Charlieplex Matrix
+Adafruit_IS31FL3731_Wing matrix = Adafruit_IS31FL3731_Wing();
+
+Ticker matrixausgabe;
+void matrixUpdate(){ // Update Charlieplexmatrix über Ticker
+  int anzahlPixel=(matrixausgabe_text.length())*6;
+  if (anzahlPixel > 15) { // Scrollen 
+    if (matrixausgabe_index >= -anzahlPixel) {
+      matrix.clear();
+      matrix.setCursor(matrixausgabe_index,0);
+      matrix.print(matrixausgabe_text);
+      matrixausgabe_index--;
+    } 
+    else {
+      matrixausgabe_index = 0;
+      matrixausgabe_wait=0;
+    }
+  } 
+  else {// nur 3 Zeichen lang-> kein Scroll 
+    matrix.setCursor(0,0);
+    matrix.print(matrixausgabe_text);
+    matrixausgabe_wait  = 0; // no wait
+  }
+}
+void matrixAnzeige(String text, int wait) { // Setze Ausgabetext
+  if (matrixausgabe_text  != text) { // update nur bei neuem Text 
+    matrix.clear();
+    matrixausgabe_index = 0;
+    matrixausgabe_text  = text;
+    matrixausgabe_wait  = wait;
+    while (matrixausgabe_wait) delay(10); // warte bis Text einmal ausgegeben ist
+  }
+};
+
+// LoraWAN Copyright (c) 2015 Thomas Telkamp and Matthijs Kooijman
+// (c) 2018 Terry Moore, MCCI
+// https://github.com/mcci-catena/arduino-lmic
+// -------- LoRa PinMapping FeatherWing Octopus
+const lmic_pinmap lmic_pins = {  
+  .nss = 2,                            // Connected to pin D
+  .rxtx = LMIC_UNUSED_PIN,             // For placeholder only, Do not connected on RFM92/RFM95
+  .rst = LMIC_UNUSED_PIN,              // Needed on RFM92/RFM95? (probably not) D0/GPIO16 
+  .dio = {
+    15, 15, LMIC_UNUSED_PIN         }
+};
+
+//Statt ... Device EUI einfügen -->
+static const u1_t PROGMEM DEVEUI[8]={...};
+void os_getDevEui (u1_t* buf) { 
+  memcpy_P(buf, DEVEUI, 8);
+}
+
+//Statt ... Application EUI einfügen -->
+static const u1_t PROGMEM APPEUI[8]={...};
+void os_getArtEui (u1_t* buf) { 
+  memcpy_P(buf, APPEUI, 8);
+}
+
+//Statt ... APPKEY einfügen -->
+static const u1_t PROGMEM APPKEY[16]={...};
+void os_getDevKey (u1_t* buf) {  
+  memcpy_P(buf, APPKEY, 16);
+};
+
+volatile int LoRaWAN_Tx_Ready      = 0; // Merker für ACK 
+
+int LoRaWAN_Rx_Payload = 0 ;
+// -------- LoRa Event 
+void onEvent (ev_t ev) { 
+  Serial.print(os_getTime());
+  Serial.print(": ");
+  switch(ev) {
+  case EV_SCAN_TIMEOUT:
+    Serial.println(F("EV_SCAN_TIMEOUT"));
+    break;
+  case EV_BEACON_FOUND:
+    Serial.println(F("EV_BEACON_FOUND"));
+    break;
+  case EV_BEACON_MISSED:
+    Serial.println(F("EV_BEACON_MISSED"));
+    break;
+  case EV_BEACON_TRACKED:
+    Serial.println(F("EV_BEACON_TRACKED"));
+    break;
+  case EV_JOINING:
+    Serial.println(F("EV_JOINING"));
+    break;
+  case EV_JOINED:
+    Serial.println(F("EV_JOINED"));
+    // Disable link check validation (automatically enabled
+    // during join, but not supported by TTN at this time).
+    LMIC_setLinkCheckMode(0);
+    break;
+  case EV_RFU1:
+    Serial.println(F("EV_RFU1"));
+    break;
+  case EV_JOIN_FAILED:
+    Serial.println(F("EV_JOIN_FAILED"));
+    break;
+  case EV_REJOIN_FAILED:
+    Serial.println(F("EV_REJOIN_FAILED"));
+    break;
+    break;
+  case EV_TXCOMPLETE:
+    Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+    if (LMIC.txrxFlags & TXRX_ACK)
+      Serial.println(F("Received ack"));
+    if (LMIC.dataLen) {
+      Serial.println(F("Received "));
+      Serial.println(LMIC.dataLen);
+      Serial.println(F(" bytes of payload"));
+      LoRaWAN_Rx_Payload = 0; 
+      for (int i = 0;i<LMIC.dataLen;i++) { 
+        Serial.println(LMIC.frame[i+ LMIC.dataBeg],HEX);
+        LoRaWAN_Rx_Payload = 256*LoRaWAN_Rx_Payload+LMIC.frame[i+ LMIC.dataBeg];
+      }
+    }
+    LoRaWAN_Tx_Ready = 1;
+    // Schedule next transmission
+    //os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+    break;
+  case EV_LOST_TSYNC:
+    Serial.println(F("EV_LOST_TSYNC"));
+    break;
+  case EV_RESET:
+    Serial.println(F("EV_RESET"));
+    break;
+  case EV_RXCOMPLETE:
+    // data received in ping slot
+    Serial.println(F("EV_RXCOMPLETE"));
+    break;
+  case EV_LINK_DEAD:
+    Serial.println(F("EV_LINK_DEAD"));
+    break;
+  case EV_LINK_ALIVE:
+    Serial.println(F("EV_LINK_ALIVE"));
+    break;
+  case EV_TXSTART:
+    Serial.println(F("EV_TXSTART"));
+    break;
+  case EV_JOIN_TXCOMPLETE:
+    Serial.println(F("EV_JOIN_TXCOMPLETE"));
+    break;
+  default:
+    Serial.println(F("Unknown event"));
+    break;
+  }
+}
+
+
+void setup(){ // Einmalige Initialisierung
+  Serial.begin(115200);
+  Serial.println();
+  Wire.begin(); // ---- Initialisiere den I2C-Bus 
+
+  if (Wire.status() != I2C_OK) Serial.println("Something wrong with I2C");
+
+  matrix.begin();// Matrix initialisieren 
+  delay(10);
+  matrix.clear(); 
+
+  matrix.setTextColor(20); // Helligkeit begrenzen 
+  matrixausgabe.attach(0.08, matrixUpdate); // zyklisch aktualisieren
+
+  // -- Initialisiere LoraWAN 
+  os_init();             // LMIC LoraWAN
+  LMIC_reset();          // Reset the MAC state 
+  LMIC.txpow = 27;       // Maximum TX power 
+  LMIC.datarate=DR_SF12; // Long Range
+  LMIC.rps = updr2rps(LMIC.datarate);
+
+  //------------ WLAN initialisieren 
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  delay(100);
+  Serial.print ("\nWLAN connect to:");
+  
+  //Bezeichnung des Netzwerks einsetzen
+  Serial.print("Netzwerkbezeichnung");
+  //Bezeichnung des Netzwerks und Passwort einsetzen
+  WiFi.begin("Netzwerkbezeichnung","PW12345");
+  
+  while (WiFi.status() != WL_CONNECTED) { // Warte bis Verbindung steht 
+    delay(500); 
+    Serial.print(".");
+  };
+  Serial.println ("\nconnected, meine IP:"+ WiFi.localIP().toString());
+  //matrixausgabe_text = " Meine IP:" + WiFi.localIP().toString();
+  matrixausgabe_index=0;
+
+}
+
+void loop() { // Kontinuierliche Wiederholung 
+  for (int index =1; index <= ( 10 ); index=index+1 )
+  {
+    Eingeloggt = WiFiPaxCounter(-100,120,0,"all mac",true) ;
+    Alle = WiFiPaxCounter(-100,120,-1,"all mac",true) ;
+    Besucher = ( Alle - Eingeloggt ) ;
+    Serial.print("Besucher:"+String(String(Besucher)));
+    Serial.println();
+    Serial.print("Alle:"+String(String(Alle)));
+    Serial.println();
+    if (( ( Besucher ) > ( 0 ) ))
+    {
+      matrixAnzeige(String(String(Besucher)),1);
+      { //Block------------------------------ sende Daten an TTN  
+        int port = 10;
+        static uint8_t mydata[3];
+        int wert=round(Besucher*1000);
+        mydata[0] = wert >> 16; 
+        mydata[1] = wert >> 8; 
+        mydata[2] = wert ;
+        // Check if there is not a current TX/RX job running
+        //if (LMIC.opmode & OP_TXRXPEND) {
+        if (LMIC.opmode & (1 << 7)) { 
+          Serial.println(F("OP_TXRXPEND, not sending"));
+        } 
+        else {
+          // Prepare upstream data transmission at the next possible time.
+          LoRaWAN_Tx_Ready = 0;                                 // Merker für ACK
+          LMIC_setTxData2(port, mydata, sizeof(mydata), 0);     // Sende         
+          Serial.println(F("Packet queued"));
+          while(LoRaWAN_Tx_Ready==0) {
+            yield();
+            os_runloop_once();
+          };  // Warte bis gesendet
+        }
+      } // Blockende
+      delay( 15000 );
+    }
+  }
+}
