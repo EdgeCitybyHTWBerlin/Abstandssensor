@@ -1,0 +1,16 @@
+function Decoder(bytes, port) { // Decode an uplink message from a buffer (array) of bytes to an object of fields.
+    var decoded = {}; //
+    decoded.port = port;
+    decoded.pax = 0; decoded.iaq = 0; decoded.pm=0;
+    if (port === 10) {  // Port selection
+      decoded.pax = (bytes[0] << 16 | bytes[1]<<8 | bytes[2] | (bytes[0] & 0x80 ? 0xFF<<24 : 0))/1000;
+      decoded.iaq = (bytes[3] << 16 | bytes[4]<<8 | bytes[5] | (bytes[3] & 0x80 ? 0xFF<<24 : 0))/1000;
+      decoded.pm = (bytes[6] << 16 | bytes[7]<<8 | bytes[8] | (bytes[6] & 0x80 ? 0xFF<<24 : 0))/1000;
+    }
+    //return decoded;
+    return{
+      field1:decoded.pax,
+      field2:decoded.iaq,
+      field3:decoded.pm
+    };
+    }
